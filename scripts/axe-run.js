@@ -10,8 +10,7 @@
  * ONE FUNCTION, BOTH RUNTIMES. `a11yAudit()` loads axe with fetch+eval, which
  * works in Playwright's main world AND the AppleScript extension's isolated
  * world. (A page <script> tag would load axe into the main world only, invisible
- * to the isolated world — see ../../spike/SPIKE-REPORT.md.) axe is pinned to
- * 4.12.1. Contrast is covered by axe; no separate tool is needed.
+ * to the isolated world.) axe is pinned to 4.12.1. Contrast is covered by axe; no separate tool is needed.
  *
  * HOW TO INVOKE
  *   Playwright MCP (preferred): pass a wrapper to browser_evaluate that inlines
@@ -71,13 +70,33 @@ async function ensureAxe() {
 // Pure: shape raw axe results into a compact, report-ready structure.
 function summarizeAxe(results, opts) {
   opts = opts || {};
-  const maxNodes = opts.maxNodes || 10;
+  // maxNodes: 0 returns every node (a whole-site report needs each location).
+  const maxNodes = opts.maxNodes === 0 ? Infinity : (opts.maxNodes || 10);
   const wcagOf = v => (v.tags || []).filter(t => /^wcag\d/.test(t));
-  const shapeNode = n => ({
-    target: n.target,
-    html: (n.html || '').slice(0, 200),
-    fix: n.failureSummary || null
-  });
+  // axe's evidence for a node: for color-contrast the measured colours and ratio, and for
+  // an incomplete node the reason axe could not decide (e.g. 'bgImage', 'bgOverlap').
+  const evidenceOf = n => {
+    const check = [].concat(n.any || [], n.all || [], n.none || []).find(c => c && c.data) || {};
+    const d = check.data;
+    if (!d || typeof d !== 'object') return null;
+    const keep = ['fgColor', 'bgColor', 'contrastRatio', 'expectedContrastRatio', 'fontSize',
+      'fontWeight', 'messageKey'];
+    const out = {};
+    keep.forEach(k => { if (d[k] !== undefined) out[k] = d[k]; });
+    return Object.keys(out).length ? out : null;
+  };
+  const shapeNode = n => {
+    const node = {
+      target: n.target,
+      html: (n.html || '').slice(0, 200),
+      fix: n.failureSummary || null
+    };
+    if (opts.evidence) {
+      node.ancestry = n.ancestry || null;
+      node.evidence = evidenceOf(n);
+    }
+    return node;
+  };
   const shape = v => ({
     id: v.id, impact: v.impact, wcag: wcagOf(v),
     help: v.help, helpUrl: v.helpUrl,
@@ -113,14 +132,23 @@ function summarizeAxe(results, opts) {
 // Load axe (if needed), run the full ruleset against the document, and shape it.
 // ENABLE_RULES turns on axe's default-disabled rules we've opted into (see above);
 // all other rules run per their defaults.
+//
+// opts (all optional): maxNodes (default 10; 0 = every node); evidence (true adds each
+// node's ancestry selector and axe's contrast data, and runs axe with ancestry on);
+// runOnly (passed to axe.run, e.g. a list of rule ids to re-check); resultTypes
+// (passed to axe.run; default all four).
 async function a11yAudit(opts) {
+  opts = opts || {};
   await ensureAxe();
   const ruleConfig = {};
   for (const id of ENABLE_RULES) ruleConfig[id] = { enabled: true };
-  const results = await axe.run(document, {
-    resultTypes: ['violations', 'incomplete', 'passes', 'inapplicable'],
+  const runOptions = {
+    resultTypes: opts.resultTypes || ['violations', 'incomplete', 'passes', 'inapplicable'],
     rules: ruleConfig
-  });
+  };
+  if (opts.runOnly) runOptions.runOnly = opts.runOnly;
+  if (opts.evidence) runOptions.ancestry = true;
+  const results = await axe.run(document, runOptions);
   return summarizeAxe(results, opts);
 }
 
